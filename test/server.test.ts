@@ -166,9 +166,11 @@ describe("LabelerServer integration", () => {
 				ws.on("error", reject);
 			});
 
-			const receivedFrames: Array<Uint8Array> = [];
-			ws.on("message", (data: Buffer) => {
-				receivedFrames.push(new Uint8Array(data));
+			const framePromise = new Promise<Uint8Array>((resolve, reject) => {
+				ws.once("message", (data: Buffer) => {
+					resolve(new Uint8Array(data));
+				});
+				ws.once("error", reject);
 			});
 
 			// Create a label while the client is subscribed
@@ -177,14 +179,8 @@ describe("LabelerServer integration", () => {
 				val: "live-event",
 			});
 
-			// Wait for WebSocket frame to arrive
-			await new Promise((resolve) => setTimeout(resolve, 300));
+			const lastFrame = await framePromise;
 			ws.close();
-
-			expect(receivedFrames.length).toBeGreaterThanOrEqual(1);
-
-			// Decode last frame
-			const lastFrame = receivedFrames[receivedFrames.length - 1];
 			const [header, remainder] = decodeFirst(lastFrame);
 			expect(header).toEqual({ op: 1, t: "#labels" });
 
