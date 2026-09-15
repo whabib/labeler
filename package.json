@@ -3,6 +3,7 @@
 	"type": "module",
 	"description": "A lightweight alternative to Ozone for operating an atproto labeler.",
 	"version": "0.2.0",
+	"packageManager": "pnpm@11.18.0",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
 	"bin": "dist/bin.js",
@@ -19,6 +20,8 @@
 		"build": "tsc",
 		"lint": "eslint . --ext .ts",
 		"fmt": "dprint fmt",
+		"test": "vitest run",
+		"test:watch": "vitest",
 		"prepublish": "pnpm lint && pnpm fmt && pnpm build"
 	},
 	"exports": {
@@ -33,7 +36,9 @@
 		"@typescript-eslint/parser": "^6.7.4",
 		"dprint": "^0.41.0",
 		"eslint": "^8.50.0",
-		"typescript": "^5.5.4"
+		"typescript": "^5.5.4",
+		"vitest": "^5.0.0",
+		"ws": "^8.21.3"
 	},
 	"dependencies": {
 		"@atcute/atproto": "^3.1.8",
@@ -45,7 +50,7 @@
 		"@atcute/lexicons": "^1.2.2",
 		"@atcute/ozone": "^3.1.10",
 		"@atcute/xrpc-server": "^0.1.2",
-		"@fastify/websocket": "^10.0.1",
+		"@fastify/websocket": "^11.3.0",
 		"@libsql/client": "^0.14.0",
 		"@noble/curves": "^1.6.0",
 		"@noble/hashes": "^1.5.0",
