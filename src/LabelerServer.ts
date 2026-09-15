@@ -10,7 +10,7 @@ import fastify, {
 	type FastifyListenOptions,
 	type FastifyRequest,
 } from "fastify";
-import type { WebSocket } from "ws";
+import { WebSocket } from "ws";
 import { parsePrivateKey, verifyJwt } from "./util/crypto.js";
 import { formatLabel, toSignedLabel } from "./util/labels.js";
 import type {
@@ -71,6 +71,15 @@ export interface LabelerOptions {
 	dbToken?: string;
 }
 
+const MAX_BUFFERED_AMOUNT = 1024 * 1024; // 1 MB backpressure limit per subscriber
+
+/** Tracks per-subscriber state including a catch-up buffer for historical replay. */
+interface SubscriberState {
+	ws: WebSocket;
+	catchingUp: boolean;
+	buffer: Array<{ seq: number; bytes: Uint8Array }>;
+}
+
 export class LabelerServer {
 	/** The Fastify application instance. */
 	app: FastifyInstance;
@@ -85,7 +94,7 @@ export class LabelerServer {
 	private auth: (did: string) => boolean | Promise<boolean>;
 
 	/** Open WebSocket connections, mapped by request NSID. */
-	private connections = new Map<string, Set<WebSocket>>();
+	private connections = new Map<string, Set<SubscriberState>>();
 
 	/** The signing key used for the labeler. */
 	#signingKey: Uint8Array;
@@ -130,17 +139,18 @@ export class LabelerServer {
 		this.dbInitLock = this.initializeDatabase();
 
 		this.app = fastify();
-		void this.app.register(fastifyWebsocket).then(() => {
-			this.app.get("/xrpc/com.atproto.label.queryLabels", this.queryLabelsHandler);
-			this.app.post("/xrpc/tools.ozone.moderation.emitEvent", this.emitEventHandler);
-			this.app.get(
+		void this.app.register(async (app) => {
+			await app.register(fastifyWebsocket);
+			app.get("/xrpc/com.atproto.label.queryLabels", this.queryLabelsHandler);
+			app.post("/xrpc/tools.ozone.moderation.emitEvent", this.emitEventHandler);
+			app.get(
 				"/xrpc/com.atproto.label.subscribeLabels",
 				{ websocket: true },
 				this.subscribeLabelsHandler,
 			);
-			this.app.get("/xrpc/_health", this.healthHandler);
-			this.app.get("/xrpc/*", this.unknownMethodHandler);
-			this.app.setErrorHandler(this.errorHandler);
+			app.get("/xrpc/_health", this.healthHandler);
+			app.get("/xrpc/*", this.unknownMethodHandler);
+			app.setErrorHandler(this.errorHandler);
 		});
 	}
 
@@ -295,9 +305,40 @@ export class LabelerServer {
 	 */
 	private emitLabel(seq: number, label: SignedLabel) {
 		const bytes = frameToBytes("message", { seq, labels: [formatLabel(label)] }, "#labels");
-		this.connections.get("com.atproto.label.subscribeLabels")?.forEach((ws) => {
-			ws.send(bytes);
-		});
+		const subs = this.connections.get("com.atproto.label.subscribeLabels");
+		if (!subs) return;
+
+		for (const sub of subs) {
+			// Prune closed or closing connections
+			if (sub.ws.readyState === WebSocket.CLOSING || sub.ws.readyState === WebSocket.CLOSED) {
+				subs.delete(sub);
+				continue;
+			}
+
+			// If the subscriber is still catching up on historical data, buffer the event
+			if (sub.catchingUp) {
+				sub.buffer.push({ seq, bytes });
+				continue;
+			}
+
+			// Enforce backpressure: if the socket's send buffer is too large, terminate it
+			if (sub.ws.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+				try {
+					sub.ws.terminate();
+				} catch { /* already dying */ }
+				subs.delete(sub);
+				continue;
+			}
+
+			try {
+				sub.ws.send(bytes);
+			} catch {
+				// Send failed — clean up this subscriber without affecting others
+				subs.delete(sub);
+			}
+		}
+
+		if (!subs.size) this.connections.delete("com.atproto.label.subscribeLabels");
 	}
 
 	/**
@@ -395,7 +436,7 @@ export class LabelerServer {
 		const params: any[] = [];
 
 		if (patterns.length) {
-			conditions.push("(" + patterns.map(() => "uri LIKE ?").join(" OR ") + ")");
+			conditions.push("(" + patterns.map(() => "uri LIKE ? ESCAPE '\\'").join(" OR ") + ")");
 			params.push(...patterns);
 		}
 
@@ -447,8 +488,16 @@ export class LabelerServer {
 		await this.dbInitLock;
 
 		const cursor = parseInt(req.query.cursor ?? "NaN", 10);
+		const hasCursor = !Number.isNaN(cursor);
 
-		if (!Number.isNaN(cursor)) {
+		// Register the subscriber immediately so emitLabel can buffer events during catch-up
+		const sub = this.addSubscription("com.atproto.label.subscribeLabels", ws, hasCursor);
+
+		ws.on("close", () => {
+			this.removeSubscription("com.atproto.label.subscribeLabels", sub);
+		});
+
+		if (hasCursor) {
 			const latest = await this.db.execute({
 				sql: "SELECT MAX(id) AS id FROM labels",
 				args: [],
@@ -458,10 +507,15 @@ export class LabelerServer {
 					error: "FutureCursor",
 					message: "Cursor is in the future",
 				});
-				ws.send(errorBytes);
+				try {
+					ws.send(errorBytes);
+				} catch { /* connection may already be dead */ }
+				this.removeSubscription("com.atproto.label.subscribeLabels", sub);
 				ws.terminate();
+				return;
 			}
 
+			let maxHistoricalSeq = 0;
 			try {
 				const result = await this.db.execute({
 					sql: `
@@ -473,7 +527,13 @@ export class LabelerServer {
 				});
 
 				for (const row of result.rows) {
+					if (ws.readyState !== WebSocket.OPEN) {
+						this.removeSubscription("com.atproto.label.subscribeLabels", sub);
+						return;
+					}
 					const { id: seq, src, uri, cid, val, neg, cts, exp, sig } = row;
+					const seqNum = Number(seq);
+					maxHistoricalSeq = Math.max(maxHistoricalSeq, seqNum);
 					const label = {
 						src: src as Did,
 						uri: uri as string,
@@ -485,7 +545,7 @@ export class LabelerServer {
 						...(sig ? { sig: new Uint8Array(sig as ArrayBuffer) } : {}),
 					};
 					const bytes = frameToBytes("message", {
-						seq: Number(seq),
+						seq: seqNum,
 						labels: [formatLabel(label)],
 					}, "#labels");
 					ws.send(bytes);
@@ -496,16 +556,35 @@ export class LabelerServer {
 					error: "InternalServerError",
 					message: "An unknown error occurred",
 				});
-				ws.send(errorBytes);
+				try {
+					ws.send(errorBytes);
+				} catch { /* connection may already be dead */ }
+				this.removeSubscription("com.atproto.label.subscribeLabels", sub);
 				ws.terminate();
+				return;
 			}
+
+			// Flush buffered events that arrived during historical replay,
+			// but only those with seq > maxHistoricalSeq to avoid duplicates
+			for (const buffered of sub.buffer) {
+				if (buffered.seq > maxHistoricalSeq) {
+					if (ws.readyState !== WebSocket.OPEN) {
+						this.removeSubscription("com.atproto.label.subscribeLabels", sub);
+						return;
+					}
+					try {
+						ws.send(buffered.bytes);
+					} catch {
+						this.removeSubscription("com.atproto.label.subscribeLabels", sub);
+						return;
+					}
+				}
+			}
+
+			// Transition from catch-up to live mode
+			sub.catchingUp = false;
+			sub.buffer = [];
 		}
-
-		this.addSubscription("com.atproto.label.subscribeLabels", ws);
-
-		ws.on("close", () => {
-			this.removeSubscription("com.atproto.label.subscribeLabels", ws);
-		});
 	};
 
 	/**
@@ -630,21 +709,27 @@ export class LabelerServer {
 	 * @param nsid The NSID of the lexicon to subscribe to.
 	 * @param ws The WebSocket connection to add.
 	 */
-	private addSubscription(nsid: string, ws: WebSocket) {
+	private addSubscription(
+		nsid: string,
+		ws: WebSocket,
+		catchingUp: boolean = false,
+	): SubscriberState {
+		const sub: SubscriberState = { ws, catchingUp, buffer: [] };
 		const subs = this.connections.get(nsid) ?? new Set();
-		subs.add(ws);
+		subs.add(sub);
 		this.connections.set(nsid, subs);
+		return sub;
 	}
 
 	/**
-	 * Remove a WebSocket connection from the list of subscribers for a given lexicon.
+	 * Remove a subscriber from the list of subscribers for a given lexicon.
 	 * @param nsid The NSID of the lexicon to unsubscribe from.
-	 * @param ws The WebSocket connection to remove.
+	 * @param sub The subscriber state to remove.
 	 */
-	private removeSubscription(nsid: string, ws: WebSocket) {
+	private removeSubscription(nsid: string, sub: SubscriberState) {
 		const subs = this.connections.get(nsid);
 		if (subs) {
-			subs.delete(ws);
+			subs.delete(sub);
 			if (!subs.size) this.connections.delete(nsid);
 		}
 	}

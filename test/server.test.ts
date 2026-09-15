@@ -279,4 +279,160 @@ describe("LabelerServer integration", () => {
 			});
 		});
 	});
+
+	describe("LIKE ESCAPE clause", () => {
+		it("correctly matches URIs containing literal underscores", async () => {
+			// Create a label with a literal underscore in the URI
+			await server.createLabel({
+				uri: "at://did:plc:underscore_test/app.bsky.feed.post/abc",
+				val: "underscore-label",
+			});
+
+			// Query with exact match containing underscore — should match only the underscore URI
+			const res = await server.app.inject({
+				method: "GET",
+				url: "/xrpc/com.atproto.label.queryLabels?uriPatterns=at://did:plc:underscore_test/*",
+			});
+
+			expect(res.statusCode).toBe(200);
+			const body = JSON.parse(res.body);
+			expect(body.labels.length).toBeGreaterThanOrEqual(1);
+			// Verify all returned labels have the literal underscore in the URI
+			expect(
+				body.labels.every((l: { uri: string }) =>
+					l.uri.startsWith("at://did:plc:underscore_test/")
+				),
+			).toBe(true);
+
+			// An underscore in SQL LIKE without ESCAPE matches any single character.
+			// Verify that "underscore.test" (dot instead of underscore) does NOT match.
+			const resDot = await server.app.inject({
+				method: "GET",
+				url: "/xrpc/com.atproto.label.queryLabels?uriPatterns=at://did:plc:underscore.test/*",
+			});
+			expect(resDot.statusCode).toBe(200);
+			const bodyDot = JSON.parse(resDot.body);
+			expect(bodyDot.labels.length).toBe(0);
+		});
+	});
+
+	describe("Subscription catch-up buffering", () => {
+		it("delivers both historical and live labels through the catch-up flow", async () => {
+			// First, create baseline labels to establish history
+			const baseline1 = await server.createLabel({
+				uri: "did:plc:catchupbase1",
+				val: "baseline-1",
+			});
+			await server.createLabel({ uri: "did:plc:catchupbase2", val: "baseline-2" });
+
+			// Record the cursor before the baselines
+			const cursorBeforeBaselines = baseline1.id - 1;
+
+			// Collect all frames as they arrive
+			const receivedFrames: Array<Uint8Array> = [];
+
+			// Connect with cursor — the handler will stream historical rows then transition to live
+			const ws = new WebSocket(
+				`${wsBaseUrl}/xrpc/com.atproto.label.subscribeLabels?cursor=${cursorBeforeBaselines}`,
+			);
+
+			ws.on("message", (data: Buffer) => {
+				receivedFrames.push(new Uint8Array(data));
+			});
+
+			await new Promise<void>((resolve, reject) => {
+				ws.on("open", resolve);
+				ws.on("error", reject);
+			});
+
+			// Wait for historical replay to complete
+			await new Promise<void>((resolve) => setTimeout(resolve, 200));
+
+			// Now create a live label — subscriber should be in live mode and receive this
+			const liveLabel = await server.createLabel({
+				uri: "did:plc:livecatchup",
+				val: "live-after-catchup",
+			});
+
+			// Wait for the live event to be delivered
+			await new Promise<void>((resolve) => setTimeout(resolve, 200));
+
+			ws.close();
+
+			// We should have received at least the 2 baseline labels + 1 live label
+			expect(receivedFrames.length).toBeGreaterThanOrEqual(3);
+
+			// Verify all are valid message frames and extract sequence numbers
+			const allSeqs: number[] = [];
+			for (const frame of receivedFrames) {
+				const [header, remainder] = decodeFirst(frame);
+				if ((header as { op: number }).op === 1) {
+					const [body] = decodeFirst(remainder);
+					allSeqs.push((body as { seq: number }).seq);
+				}
+			}
+
+			// Historical labels should be present
+			expect(allSeqs).toContain(baseline1.id);
+
+			// The live label should also have been delivered (not dropped)
+			expect(allSeqs).toContain(liveLabel.id);
+
+			// Sequence numbers should be monotonically increasing
+			for (let i = 1; i < allSeqs.length; i++) {
+				expect(allSeqs[i]).toBeGreaterThan(allSeqs[i - 1]);
+			}
+		});
+	});
+
+	describe("emitLabel with closed sockets", () => {
+		it("handles closed sockets without errors or affecting other subscribers", async () => {
+			// Connect two WebSocket subscribers
+			const ws1 = new WebSocket(`${wsBaseUrl}/xrpc/com.atproto.label.subscribeLabels`);
+			const ws2 = new WebSocket(`${wsBaseUrl}/xrpc/com.atproto.label.subscribeLabels`);
+
+			await Promise.all([
+				new Promise<void>((resolve, reject) => {
+					ws1.on("open", resolve);
+					ws1.on("error", reject);
+				}),
+				new Promise<void>((resolve, reject) => {
+					ws2.on("open", resolve);
+					ws2.on("error", reject);
+				}),
+			]);
+
+			// Close one subscriber immediately
+			ws1.close();
+			await new Promise<void>((resolve) => {
+				ws1.on("close", resolve);
+			});
+
+			// Set up listener on the surviving subscriber
+			const framePromise = new Promise<Uint8Array>((resolve, reject) => {
+				ws2.once("message", (data: Buffer) => {
+					resolve(new Uint8Array(data));
+				});
+				ws2.once("error", reject);
+			});
+
+			// Create a label — emitLabel should prune the closed ws1 and still deliver to ws2
+			const created = await server.createLabel({
+				uri: "did:plc:closedtest",
+				val: "survives-close",
+			});
+
+			const frame = await framePromise;
+			ws2.close();
+
+			const [header, remainder] = decodeFirst(frame);
+			expect(header).toEqual({ op: 1, t: "#labels" });
+
+			const [body] = decodeFirst(remainder);
+			expect((body as { seq: number }).seq).toBe(created.id);
+			expect((body as { labels: Array<{ val: string }> }).labels[0].val).toBe(
+				"survives-close",
+			);
+		});
+	});
 });
