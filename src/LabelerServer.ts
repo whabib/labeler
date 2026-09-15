@@ -78,6 +78,7 @@ interface SubscriberState {
 	ws: WebSocket;
 	catchingUp: boolean;
 	buffer: Array<{ seq: number; bytes: Uint8Array }>;
+	bufferedBytes: number;
 }
 
 export class LabelerServer {
@@ -317,7 +318,16 @@ export class LabelerServer {
 
 			// If the subscriber is still catching up on historical data, buffer the event
 			if (sub.catchingUp) {
+				const nextBufferedBytes = sub.bufferedBytes + bytes.byteLength;
+				if (nextBufferedBytes > MAX_BUFFERED_AMOUNT) {
+					try {
+						sub.ws.terminate();
+					} catch { /* already dying */ }
+					subs.delete(sub);
+					continue;
+				}
 				sub.buffer.push({ seq, bytes });
+				sub.bufferedBytes = nextBufferedBytes;
 				continue;
 			}
 
@@ -572,6 +582,11 @@ export class LabelerServer {
 						this.removeSubscription("com.atproto.label.subscribeLabels", sub);
 						return;
 					}
+					if (ws.bufferedAmount + buffered.bytes.byteLength > MAX_BUFFERED_AMOUNT) {
+						this.removeSubscription("com.atproto.label.subscribeLabels", sub);
+						ws.terminate();
+						return;
+					}
 					try {
 						ws.send(buffered.bytes);
 					} catch {
@@ -584,6 +599,7 @@ export class LabelerServer {
 			// Transition from catch-up to live mode
 			sub.catchingUp = false;
 			sub.buffer = [];
+			sub.bufferedBytes = 0;
 		}
 	};
 
@@ -714,7 +730,7 @@ export class LabelerServer {
 		ws: WebSocket,
 		catchingUp: boolean = false,
 	): SubscriberState {
-		const sub: SubscriberState = { ws, catchingUp, buffer: [] };
+		const sub: SubscriberState = { ws, catchingUp, buffer: [], bufferedBytes: 0 };
 		const subs = this.connections.get(nsid) ?? new Set();
 		subs.add(sub);
 		this.connections.set(nsid, subs);
