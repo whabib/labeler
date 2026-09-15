@@ -1,5 +1,6 @@
 import { XRPCError } from "@atcute/xrpc-server";
 import { secp256k1 as k256 } from "@noble/curves/secp256k1";
+import { sha256 } from "@noble/hashes/sha256";
 import * as ui8 from "uint8arrays";
 import { describe, expect, it } from "vitest";
 import {
@@ -65,9 +66,12 @@ describe("crypto", () => {
 		it("signs a message that verifies with secp256k1", () => {
 			const message = new TextEncoder().encode("test message to sign");
 			const sig = k256Sign(testBytesKey, message);
+			const messageHash = sha256(message);
+			const pubKey = k256.getPublicKey(testBytesKey);
 
 			expect(sig).toBeInstanceOf(Uint8Array);
 			expect(sig.byteLength).toBe(64); // 64-byte compact signature
+			expect(k256.verify(sig, messageHash, pubKey)).toBe(true);
 		});
 	});
 
