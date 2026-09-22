@@ -192,7 +192,7 @@ if (command === "setup" || command === "clear") {
 		}
 	}
 } else {
-	console.log("Usage: npx @skyware/labeler [command]");
+	console.log("Usage: npx github:whabib/labeler [command]");
 	console.log("Commands:");
 	console.log("  setup - Initialize an account as a labeler.");
 	console.log("  clear - Restore a labeler account to normal.");

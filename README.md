@@ -1,19 +1,16 @@
-<p align="center">
-	<img src="https://github.com/skyware-js/.github/blob/main/assets/logo-dark.png?raw=true" height="72">
-</p>
-<h1 align="center">@skyware/labeler</h1>
+<h1 align="center">labeler</h1>
 
 A lightweight alternative to Ozone for operating an atproto labeler.
 
-[Documentation](https://skyware.js.org/docs/firehose)
+Forked from [skyware-js/labeler](https://github.com/skyware-js/labeler).
 
 ## CLI
 
-The `@skyware/labeler` package also comes with a CLI for setting up and managing a labeler.
+The `labeler` package also comes with a CLI for setting up and managing a labeler.
 
 ```sh
-$ npx @skyware/labeler
-Usage: npx @skyware/labeler [command]
+$ npx github:whabib/labeler
+Usage: npx github:whabib/labeler [command]
 Commands:
   setup - Initialize an account as a labeler.
   clear - Restore a labeler account to normal.
@@ -23,20 +20,20 @@ Commands:
   label edit - Bulk edit label definitions.
 ```
 
-For a full guide to setting up a labeler, see [Getting Started](https://skyware.js.org/guides/labeler/introduction/getting-started).
+To set up a new labeler account, run the `setup` command above.
 
 ## Installation
 
 ```sh
-npm install @skyware/labeler
+npm install github:whabib/labeler
 ```
 
 ## Example Usage
 
-This library requires an existing labeler declaration. To get set up, refer to the [Getting Started](https://skyware.js.org/guides/labeler/introduction/getting-started) guide.
+This library requires an existing labeler declaration. To get set up, use the `setup` command of the [CLI](#cli).
 
 ```js
-import { LabelerServer } from "@skyware/labeler";
+import { LabelerServer } from "labeler";
 
 const server = new LabelerServer({ did: "···", signingKey: "···" });
 
