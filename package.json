@@ -17,6 +17,7 @@
 	],
 	"scripts": {
 		"build": "tsc",
+		"prepare": "tsc",
 		"lint": "eslint . --ext .ts",
 		"fmt": "dprint fmt",
 		"test": "vitest run",
