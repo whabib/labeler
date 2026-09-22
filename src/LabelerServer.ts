@@ -29,8 +29,8 @@ const INVALID_DID_ERROR =
 	`Make sure to provide a valid DID using either did:plc or did:web methods.`;
 const INVALID_SIGNING_KEY_ERROR = `Make sure to provide a private signing key, not a public key.
 
-If you don't have a key, generate and set one using the \`npx @skyware/labeler setup\` command or the \`import { plcSetupLabeler } from "@skyware/labeler/scripts"\` function.
-For more information, see https://skyware.js.org/guides/labeler/introduction/getting-started/`;
+If you don't have a key, generate and set one using the \`npx github:whabib/labeler setup\` command or the \`import { plcSetupLabeler } from "labeler/scripts"\` function.
+For more information, see https://github.com/whabib/labeler#readme`;
 
 /**
  * Options for the {@link LabelerServer} class.
