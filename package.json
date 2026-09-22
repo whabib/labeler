@@ -22,7 +22,7 @@
 		"fmt": "dprint fmt",
 		"test": "vitest run",
 		"test:watch": "vitest",
-		"prepublish": "pnpm lint && pnpm fmt && pnpm build"
+		"prepublishOnly": "pnpm lint && pnpm fmt && pnpm build"
 	},
 	"exports": {
 		".": "./dist/index.js",
