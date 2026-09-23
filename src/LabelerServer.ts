@@ -301,7 +301,9 @@ export class LabelerServer {
 	}
 
 	/**
-	 * Emit a label to all subscribers.
+	 * Emit a label to all subscribers connected to this server.
+	 * Servers sharing a Postgres table don't see each other's labels live; a subscriber
+	 * receives labels created elsewhere when it reconnects and replays from its cursor.
 	 * @param seq The label's id.
 	 * @param label The label to emit.
 	 */

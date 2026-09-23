@@ -6,7 +6,7 @@ import pg from "pg";
 import * as ui8 from "uint8arrays";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { LabelerServer } from "../src/LabelerServer.js";
-import { PostgresLabelStore } from "../src/store/PostgresLabelStore.js";
+import { type PgPoolLike, PostgresLabelStore } from "../src/store/PostgresLabelStore.js";
 import { SqliteLabelStore } from "../src/store/SqliteLabelStore.js";
 
 const did = "did:plc:ragtjsm2j2vknq6zbnujgah7";
@@ -140,6 +140,49 @@ describe.skipIf(!testDatabaseUrl)("Postgres store", () => {
 			(store as unknown as { lockKey: string }).lockKey;
 		expect(lockKey(unqualified)).toBe(`labeler:public.${name}`);
 		expect(lockKey(qualified)).toBe(lockKey(unqualified));
+	});
+
+	it("keeps using the resolved schema when connections have a different search_path", async () => {
+		const suffix = `${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+		const [resolved, other] = [`labeler_sp_a_${suffix}`, `labeler_sp_b_${suffix}`];
+		await pool.query(`CREATE SCHEMA ${resolved}`);
+		await pool.query(`CREATE SCHEMA ${other}`);
+		const poolA = new pg.Pool({
+			connectionString: testDatabaseUrl,
+			options: `-c search_path=${resolved}`,
+		});
+		const poolB = new pg.Pool({
+			connectionString: testDatabaseUrl,
+			options: `-c search_path=${other}`,
+		});
+		// Resolving the schema sees `resolved`; every later query runs with `other`
+		const mixedPool: PgPoolLike = {
+			query: (text, values) =>
+				(text.includes("current_schema()") ? poolA : poolB).query(text, values),
+			connect: () => poolB.connect(),
+			end: () => Promise.resolve(),
+		};
+
+		try {
+			const server = new LabelerServer({
+				did,
+				signingKey,
+				postgres: { pool: mixedPool, table: "labels" },
+			});
+			await server.createLabel({ uri: "did:plc:searchpath", val: "sp" });
+
+			const tablesFound = await pool.query(
+				"SELECT table_schema FROM information_schema.tables WHERE table_name = 'labels' AND table_schema IN ($1, $2)",
+				[resolved, other],
+			);
+			expect(tablesFound.rows.map((row) => row.table_schema)).toEqual([resolved]);
+			const count = await pool.query(`SELECT COUNT(*)::int AS n FROM ${resolved}.labels`);
+			expect(count.rows[0].n).toBe(1);
+		} finally {
+			await Promise.all([poolA.end(), poolB.end()]);
+			await pool.query(`DROP SCHEMA ${resolved} CASCADE`);
+			await pool.query(`DROP SCHEMA ${other} CASCADE`);
+		}
 	});
 
 	it("creates the index for a table name at the maximum length", async () => {

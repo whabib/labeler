@@ -71,7 +71,7 @@ const server = new LabelerServer({
 
 The schema, table and index are created on startup if they don't exist. A pool you pass in is never closed by the server.
 
-Several servers can share one table (for example, while an old and a new deployment overlap): inserts take a Postgres advisory lock so label ids are committed in order.
+Several servers can share one table, for example while an old and a new deployment overlap. Inserts take a Postgres advisory lock, so label ids are committed in order and no server skips a label when replaying from a cursor. Live `subscribeLabels` delivery is per server, though: a subscriber only receives live labels created by the server it's connected to. Labels created by another server reach it when it reconnects and replays from its cursor. Running several servers against one table for a long time is therefore not recommended.
 
 `cts` and `exp` are stored as text, because labels are signed over the exact timestamp strings.
 
