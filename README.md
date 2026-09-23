@@ -62,7 +62,8 @@ const server = new LabelerServer({
     signingKey: "···",
     postgres: {
         connectionString: process.env.DATABASE_URL,
-        // Optional, defaults to "labels". May be schema-qualified.
+        // Optional, defaults to "labels". May be schema-qualified; the table name itself
+        // can be up to 55 lowercase letters, digits and underscores.
         table: "labeler.labels",
     },
 });
