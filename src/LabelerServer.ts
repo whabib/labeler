@@ -4,13 +4,15 @@ import type { ToolsOzoneModerationEmitEvent } from "@atcute/ozone";
 import { XRPCError } from "@atcute/xrpc-server";
 
 import { fastifyWebsocket } from "@fastify/websocket";
-import { Client, createClient } from "@libsql/client";
 import fastify, {
 	type FastifyInstance,
 	type FastifyListenOptions,
 	type FastifyRequest,
 } from "fastify";
 import { WebSocket } from "ws";
+import type { LabelStore } from "./store/LabelStore.js";
+import { PostgresLabelStore, type PostgresLabelStoreOptions } from "./store/PostgresLabelStore.js";
+import { SqliteLabelStore } from "./store/SqliteLabelStore.js";
 import { parsePrivateKey, verifyJwt } from "./util/crypto.js";
 import { formatLabel, toSignedLabel } from "./util/labels.js";
 import type {
@@ -69,9 +71,17 @@ export interface LabelerOptions {
 	 * Required if {@link dbUrl} is provided.
 	 */
 	dbToken?: string;
+
+	/**
+	 * Store labels in PostgreSQL instead of SQLite.
+	 * Cannot be combined with {@link dbPath} or {@link dbUrl}.
+	 */
+	postgres?: PostgresLabelStoreOptions;
 }
 
 const MAX_BUFFERED_AMOUNT = 1024 * 1024; // 1 MB backpressure limit per subscriber
+const REPLAY_PAGE_SIZE = 500; // Labels fetched per query during subscribeLabels replay
+const REPLAY_DRAIN_TIMEOUT_MS = 30_000; // Give up on a subscriber that stops reading during replay
 
 /** Tracks per-subscriber state including a catch-up buffer for historical replay. */
 interface SubscriberState {
@@ -85,8 +95,8 @@ export class LabelerServer {
 	/** The Fastify application instance. */
 	app: FastifyInstance;
 
-	/** The SQLite database instance. */
-	db: Client;
+	/** The label storage backend. */
+	readonly store: LabelStore;
 
 	/** The DID of the labeler account. */
 	did: Did;
@@ -105,6 +115,9 @@ export class LabelerServer {
 	 * This should be awaited before any database operations.
 	 */
 	private readonly dbInitLock?: Promise<void>;
+
+	/** Chains label inserts so labels are stored and emitted in id order. */
+	private insertQueue: Promise<unknown> = Promise.resolve();
 
 	/**
 	 * Create a labeler server.
@@ -126,15 +139,15 @@ export class LabelerServer {
 			throw new Error(INVALID_SIGNING_KEY_ERROR);
 		}
 
-		if (options.dbUrl) {
-			if (!options.dbToken) {
+		if (options.postgres) {
+			if (options.dbPath || options.dbUrl) {
 				throw new Error(
-					"The `dbToken` option is required when using a remote database URL.",
+					"The `postgres` option cannot be combined with `dbPath` or `dbUrl`.",
 				);
 			}
-			this.db = createClient({ url: options.dbUrl, authToken: options.dbToken });
+			this.store = new PostgresLabelStore(options.postgres);
 		} else {
-			this.db = createClient({ url: "file:" + (options.dbPath ?? "labels.db") });
+			this.store = new SqliteLabelStore(options);
 		}
 
 		this.dbInitLock = this.initializeDatabase();
@@ -160,28 +173,18 @@ export class LabelerServer {
 	 * @returns A promise that resolves when initialization is complete
 	 */
 	private async initializeDatabase() {
-		await this.db.execute("PRAGMA journal_mode = WAL").catch(() => {
-			console.warn(
-				"Unable to set WAL mode — performance and concurrent access may be impacted.",
-			);
-		});
-
-		await this.db.execute(`
-			CREATE TABLE IF NOT EXISTS labels (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				src TEXT NOT NULL,
-				uri TEXT NOT NULL,
-				cid TEXT,
-				val TEXT NOT NULL,
-				neg BOOLEAN DEFAULT FALSE,
-				cts DATETIME NOT NULL,
-				exp DATETIME,
-				sig BLOB
-			);
-		`).catch((error) => {
+		await this.store.init().catch((error) => {
 			console.error("Failed to initialize database:", error);
 			throw error;
 		});
+	}
+
+	/**
+	 * Wait for the database schema to be created.
+	 * Label methods already wait for this; use it before querying the store directly.
+	 */
+	async ready(): Promise<void> {
+		await this.dbInitLock;
 	}
 
 	/**
@@ -215,7 +218,11 @@ export class LabelerServer {
 	 * @param callback A callback to run when the server is stopped.
 	 */
 	close(callback: () => void = () => {}) {
-		this.app.close(callback);
+		this.app.close(() => {
+			this.store.close().catch((error) => {
+				console.error("Failed to close database:", error);
+			}).finally(callback);
+		});
 	}
 
 	/**
@@ -235,22 +242,16 @@ export class LabelerServer {
 		await this.dbInitLock;
 
 		const signed = toSignedLabel(label, this.#signingKey);
-		const { src, uri, cid, val, neg, cts, exp, sig } = signed;
 
-		const sql = `
-    		INSERT INTO labels (src, uri, cid, val, neg, cts, exp, sig)
-    		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    		RETURNING id
-		`;
+		// Insert and emit one label at a time, so subscribers receive labels in id order
+		const saved = this.insertQueue.then(async () => {
+			const id = await this.store.insert(signed);
+			this.emitLabel(id, signed);
+			return id;
+		});
+		this.insertQueue = saved.catch(() => {});
 
-		const args = [src, uri, cid || null, val, neg ? 1 : 0, cts, exp || null, sig];
-
-		const result = await this.db.execute({ sql, args });
-		if (!result.rows.length) throw new Error("Failed to insert label");
-
-		const id = Number(result.rows[0].id);
-
-		this.emitLabel(id, signed);
+		const id = await saved;
 		return { id, ...formatLabel(signed) };
 	}
 
@@ -300,7 +301,9 @@ export class LabelerServer {
 	}
 
 	/**
-	 * Emit a label to all subscribers.
+	 * Emit a label to all subscribers connected to this server.
+	 * Servers sharing a Postgres table don't see each other's labels live; a subscriber
+	 * receives labels created elsewhere when it reconnects and replays from its cursor.
 	 * @param seq The label's id.
 	 * @param label The label to emit.
 	 */
@@ -442,48 +445,7 @@ export class LabelerServer {
 			return pattern.slice(0, -1) + "%";
 		});
 
-		const conditions: string[] = [];
-		const params: any[] = [];
-
-		if (patterns.length) {
-			conditions.push("(" + patterns.map(() => "uri LIKE ? ESCAPE '\\'").join(" OR ") + ")");
-			params.push(...patterns);
-		}
-
-		if (sources.length) {
-			conditions.push(`src IN (${sources.map(() => "?").join(", ")})`);
-			params.push(...sources);
-		}
-
-		if (cursor) {
-			conditions.push("id > ?");
-			params.push(cursor);
-		}
-
-		params.push(limit);
-
-		const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-		const result = await this.db.execute({
-			sql: `
-				SELECT * FROM labels
-				${whereClause}
-				ORDER BY id ASC
-				LIMIT ?
-			`,
-			args: params,
-		});
-
-		const rows = result.rows.map((row) => ({
-			id: Number(row.id),
-			src: row.src as Did,
-			uri: row.uri as string,
-			val: row.val as string,
-			neg: Boolean(row.neg),
-			cts: row.cts as string,
-			...(row.cid ? { cid: row.cid as string } : {}),
-			...(row.exp ? { exp: row.exp as string } : {}),
-			...(row.sig ? { sig: new Uint8Array(row.sig as ArrayBuffer) } : {}),
-		}));
+		const rows = await this.store.query({ uriPatterns: patterns, sources, cursor, limit });
 		const labels = rows.map(formatLabel);
 
 		const nextCursor = rows[rows.length - 1]?.id?.toString(10) || "0";
@@ -508,11 +470,7 @@ export class LabelerServer {
 		});
 
 		if (hasCursor) {
-			const latest = await this.db.execute({
-				sql: "SELECT MAX(id) AS id FROM labels",
-				args: [],
-			});
-			if (cursor > (Number(latest.rows[0]?.id) ?? 0)) {
+			if (cursor > await this.store.maxId()) {
 				const errorBytes = frameToBytes("error", {
 					error: "FutureCursor",
 					message: "Cursor is in the future",
@@ -527,38 +485,39 @@ export class LabelerServer {
 
 			let maxHistoricalSeq = 0;
 			try {
-				const result = await this.db.execute({
-					sql: `
-						SELECT * FROM labels
-						WHERE id > ?
-						ORDER BY id ASC
-					`,
-					args: [cursor],
-				});
+				// Replay history a page at a time, waiting for the socket to drain between
+				// pages, so a subscriber starting far back doesn't pull it all into memory
+				let pageCursor = cursor;
+				while (true) {
+					const page = await this.store.query({
+						uriPatterns: [],
+						sources: [],
+						cursor: pageCursor,
+						limit: REPLAY_PAGE_SIZE,
+					});
 
-				for (const row of result.rows) {
-					if (ws.readyState !== WebSocket.OPEN) {
+					for (const { id: seq, ...label } of page) {
+						if (ws.readyState !== WebSocket.OPEN) {
+							this.removeSubscription("com.atproto.label.subscribeLabels", sub);
+							return;
+						}
+						maxHistoricalSeq = Math.max(maxHistoricalSeq, seq);
+						const bytes = frameToBytes(
+							"message",
+							{ seq, labels: [formatLabel(label)] },
+							"#labels",
+						);
+						ws.send(bytes);
+					}
+
+					if (page.length < REPLAY_PAGE_SIZE) break;
+					pageCursor = page[page.length - 1].id;
+
+					if (!await waitForDrain(ws)) {
 						this.removeSubscription("com.atproto.label.subscribeLabels", sub);
+						ws.terminate();
 						return;
 					}
-					const { id: seq, src, uri, cid, val, neg, cts, exp, sig } = row;
-					const seqNum = Number(seq);
-					maxHistoricalSeq = Math.max(maxHistoricalSeq, seqNum);
-					const label = {
-						src: src as Did,
-						uri: uri as string,
-						val: val as string,
-						neg: Boolean(neg),
-						cts: cts as string,
-						...(cid ? { cid: cid as string } : {}),
-						...(exp ? { exp: exp as string } : {}),
-						...(sig ? { sig: new Uint8Array(sig as ArrayBuffer) } : {}),
-					};
-					const bytes = frameToBytes("message", {
-						seq: seqNum,
-						labels: [formatLabel(label)],
-					}, "#labels");
-					ws.send(bytes);
 				}
 			} catch (e) {
 				console.error(e);
@@ -690,9 +649,9 @@ export class LabelerServer {
 	 * Handler for the health check endpoint.
 	 */
 	healthHandler: QueryHandler = async (_req, res) => {
-		const VERSION = "0.2.0";
+		const VERSION = "0.3.0";
 		try {
-			await this.db.execute({ sql: "SELECT 1", args: [] });
+			await this.store.ping();
 			return res.send({ version: VERSION });
 		} catch (e) {
 			return res.status(503).send({ version: VERSION, error: "Service Unavailable" });
@@ -749,4 +708,17 @@ export class LabelerServer {
 			if (!subs.size) this.connections.delete(nsid);
 		}
 	}
+}
+
+/**
+ * Wait until a socket's send buffer drops below {@link MAX_BUFFERED_AMOUNT}.
+ * @returns false if the socket closed or didn't drain within {@link REPLAY_DRAIN_TIMEOUT_MS}.
+ */
+async function waitForDrain(ws: WebSocket): Promise<boolean> {
+	const deadline = Date.now() + REPLAY_DRAIN_TIMEOUT_MS;
+	while (ws.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+		if (ws.readyState !== WebSocket.OPEN || Date.now() > deadline) return false;
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	return ws.readyState === WebSocket.OPEN;
 }

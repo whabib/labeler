@@ -2,7 +2,7 @@
 	"name": "labeler",
 	"type": "module",
 	"description": "A lightweight alternative to Ozone for operating an atproto labeler.",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"packageManager": "pnpm@11.18.0",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -30,6 +30,7 @@
 	},
 	"devDependencies": {
 		"@types/node": "^20.11.19",
+		"@types/pg": "^8.23.1",
 		"@types/prompts": "^2.4.9",
 		"@types/ws": "^8.5.12",
 		"@typescript-eslint/eslint-plugin": "^6.7.4",
@@ -55,6 +56,7 @@
 		"@noble/curves": "^1.6.0",
 		"@noble/hashes": "^1.5.0",
 		"fastify": "^5.12.1",
+		"pg": "^8.23.0",
 		"prompts": "^2.4.2",
 		"uint8arrays": "^5.1.0"
 	},

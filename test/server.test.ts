@@ -1,16 +1,78 @@
-import { decodeFirst } from "@atcute/cbor";
+import { decodeFirst, encode as cborEncode, fromBytes } from "@atcute/cbor";
 import { secp256k1 as k256 } from "@noble/curves/secp256k1";
+import { sha256 } from "@noble/hashes/sha256";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import pg from "pg";
 import * as ui8 from "uint8arrays";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
-import { LabelerServer } from "../src/LabelerServer.js";
+import { type LabelerOptions, LabelerServer } from "../src/LabelerServer.js";
 
-describe("LabelerServer integration", () => {
+/** A storage backend to run the integration suite against. */
+interface Backend {
+	name: string;
+	/** Returns the storage options for a fresh, empty database, and a cleanup function. */
+	setup(): Promise<{ options: Partial<LabelerOptions>; cleanup: () => Promise<void> }>;
+}
+
+const sqliteBackend: Backend = {
+	name: "SQLite",
+	async setup() {
+		const dbDir = await fs.mkdtemp(path.join(os.tmpdir(), "labeler-test-"));
+		return {
+			options: { dbPath: path.join(dbDir, "labels.db") },
+			cleanup: () => fs.rm(dbDir, { recursive: true, force: true }),
+		};
+	},
+};
+
+/** Set TEST_DATABASE_URL to a disposable Postgres database to also run against Postgres. */
+const testDatabaseUrl = process.env.TEST_DATABASE_URL;
+
+const postgresBackend: Backend = {
+	name: "Postgres",
+	setup() {
+		const table = `labeler_test.labels_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+		return Promise.resolve({
+			options: { postgres: { connectionString: testDatabaseUrl, table } },
+			cleanup: async () => {
+				const client = new pg.Client({ connectionString: testDatabaseUrl });
+				await client.connect();
+				await client.query(`DROP TABLE IF EXISTS ${table}`);
+				await client.end();
+			},
+		});
+	},
+};
+
+/** Collect every #labels frame's seq from a subscriber until `done` resolves. */
+function collectSeqs(ws: WebSocket): Array<number> {
+	const seqs: Array<number> = [];
+	ws.on("message", (data: Buffer) => {
+		const [header, remainder] = decodeFirst(new Uint8Array(data));
+		if ((header as { op: number }).op === 1) {
+			const [body] = decodeFirst(remainder);
+			seqs.push((body as { seq: number }).seq);
+		}
+	});
+	return seqs;
+}
+
+async function waitFor(condition: () => boolean, timeoutMs = 5000) {
+	const deadline = Date.now() + timeoutMs;
+	while (!condition()) {
+		if (Date.now() > deadline) throw new Error("Timed out waiting for condition");
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+}
+
+const backends = testDatabaseUrl ? [sqliteBackend, postgresBackend] : [sqliteBackend];
+
+describe.each(backends)("LabelerServer integration ($name)", (backend) => {
 	let server: LabelerServer;
-	let dbDir: string;
+	let cleanup: () => Promise<void>;
 	let wsBaseUrl: string;
 
 	const labelerDid = "did:plc:ragtjsm2j2vknq6zbnujgah7";
@@ -18,10 +80,14 @@ describe("LabelerServer integration", () => {
 	const privateKeyHex = ui8.toString(privateKeyBytes, "hex");
 
 	beforeAll(async () => {
-		dbDir = await fs.mkdtemp(path.join(os.tmpdir(), "labeler-test-"));
-		const dbPath = path.join(dbDir, "labels.db");
+		const setup = await backend.setup();
+		cleanup = setup.cleanup;
 
-		server = new LabelerServer({ did: labelerDid, signingKey: privateKeyHex, dbPath });
+		server = new LabelerServer({
+			did: labelerDid,
+			signingKey: privateKeyHex,
+			...setup.options,
+		});
 
 		// Start server on an ephemeral free port
 		await new Promise<void>((resolve, reject) => {
@@ -42,7 +108,7 @@ describe("LabelerServer integration", () => {
 				resolve();
 			});
 		});
-		await fs.rm(dbDir, { recursive: true, force: true });
+		await cleanup();
 	});
 
 	describe("Health Check", () => {
@@ -50,7 +116,7 @@ describe("LabelerServer integration", () => {
 			const res = await server.app.inject({ method: "GET", url: "/xrpc/_health" });
 
 			expect(res.statusCode).toBe(200);
-			expect(JSON.parse(res.body)).toEqual({ version: "0.2.0" });
+			expect(JSON.parse(res.body)).toEqual({ version: "0.3.0" });
 		});
 	});
 
@@ -382,6 +448,75 @@ describe("LabelerServer integration", () => {
 			for (let i = 1; i < allSeqs.length; i++) {
 				expect(allSeqs[i]).toBeGreaterThan(allSeqs[i - 1]);
 			}
+		});
+	});
+
+	describe("Storage round-trip", () => {
+		it("returns cts and exp exactly as signed, with a valid signature", async () => {
+			// No milliseconds and a non-UTC offset: a timestamp column would normalize these
+			const created = await server.createLabel({
+				uri: "did:plc:roundtrip",
+				val: "exact-time",
+				cts: "2026-01-02T03:04:05+02:00",
+				exp: "2027-01-01T00:00:00Z",
+			});
+
+			const res = await server.app.inject({
+				method: "GET",
+				url: "/xrpc/com.atproto.label.queryLabels?uriPatterns=did:plc:roundtrip",
+			});
+			const [label] = JSON.parse(res.body).labels;
+			expect(label.cts).toBe("2026-01-02T03:04:05+02:00");
+			expect(label.exp).toBe("2027-01-01T00:00:00Z");
+			expect(label.sig).toEqual(JSON.parse(JSON.stringify(created.sig)));
+
+			// queryLabels includes each label's database id, which is not part of the signed data
+			expect(label.id).toBe(created.id);
+			const { sig, ...unsigned } = label;
+			delete unsigned.id;
+			const signedBytes = cborEncode(unsigned);
+			const publicKey = k256.getPublicKey(privateKeyBytes);
+			expect(k256.verify(fromBytes(sig), sha256(signedBytes), publicKey)).toBe(true);
+		});
+	});
+
+	describe("Replay paging and ordering", () => {
+		it("replays history larger than one page in order without duplicates", async () => {
+			const before = await server.store.maxId();
+			const created: Array<number> = [];
+			for (let i = 0; i < 1200; i++) {
+				const label = await server.createLabel({ uri: `did:plc:page${i}`, val: "paged" });
+				created.push(label.id);
+			}
+
+			const ws = new WebSocket(
+				`${wsBaseUrl}/xrpc/com.atproto.label.subscribeLabels?cursor=${before}`,
+			);
+			const seqs = collectSeqs(ws);
+			await waitFor(() => seqs.length >= created.length);
+			ws.close();
+
+			expect(seqs).toEqual(created);
+		});
+
+		it("stores and emits concurrently created labels in id order", async () => {
+			const ws = new WebSocket(`${wsBaseUrl}/xrpc/com.atproto.label.subscribeLabels`);
+			await new Promise<void>((resolve, reject) => {
+				ws.on("open", resolve);
+				ws.on("error", reject);
+			});
+			const seqs = collectSeqs(ws);
+
+			const labels = await Promise.all(
+				Array.from({ length: 25 }, (_, i) =>
+					server.createLabel({ uri: `did:plc:concurrent${i}`, val: "concurrent" })),
+			);
+			await waitFor(() => seqs.length >= labels.length);
+			ws.close();
+
+			const ids = labels.map((label) => label.id);
+			expect(new Set(ids).size).toBe(ids.length);
+			expect(seqs).toEqual([...ids].sort((a, b) => a - b));
 		});
 	});
 
