@@ -60,7 +60,7 @@ describe("labels", () => {
 			expect(formatted.src).toBe(testDid);
 			expect(formatted.uri).toBe(testPostUri);
 			expect(formatted.sig).toHaveProperty("$bytes");
-			expect(typeof (formatted.sig as { $bytes: string }).$bytes).toBe("string");
+			expect(typeof formatted.sig.$bytes).toBe("string");
 
 			// Roundtrip bytes
 			const decodedSig = fromBytes(formatted.sig);

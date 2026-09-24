@@ -18,7 +18,7 @@
 	"scripts": {
 		"build": "tsc",
 		"prepare": "tsc",
-		"lint": "eslint . --ext .ts",
+		"lint": "eslint .",
 		"fmt": "dprint fmt",
 		"test": "vitest run",
 		"test:watch": "vitest",
@@ -29,15 +29,14 @@
 		"./scripts": "./dist/scripts/index.js"
 	},
 	"devDependencies": {
-		"@types/node": "^20.11.19",
+		"@types/node": "^22.20.4",
 		"@types/pg": "^8.23.1",
 		"@types/prompts": "^2.4.9",
 		"@types/ws": "^8.5.12",
-		"@typescript-eslint/eslint-plugin": "^6.7.4",
-		"@typescript-eslint/parser": "^6.7.4",
 		"dprint": "^0.41.0",
-		"eslint": "^8.50.0",
+		"eslint": "^10.11.0",
 		"typescript": "^5.5.4",
+		"typescript-eslint": "^8.70.1",
 		"vitest": "^5.0.0",
 		"ws": "^8.21.3"
 	},

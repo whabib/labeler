@@ -124,7 +124,7 @@ export async function verifyJwt(
 		});
 	}
 
-	const signingKey = await resolveDidToSigningKey(payload.iss, false).catch((e) => {
+	const signingKey = await resolveDidToSigningKey(payload.iss, false).catch((e: unknown) => {
 		console.error(e);
 		throw new XRPCError({
 			status: 500,
@@ -136,7 +136,7 @@ export async function verifyJwt(
 	let validSig: boolean;
 	try {
 		validSig = verifySignatureWithKey(signingKey, msgBytes, sigBytes);
-	} catch (err) {
+	} catch {
 		throw new XRPCError({
 			status: 401,
 			error: "BadJwtSignature",
@@ -151,7 +151,7 @@ export async function verifyJwt(
 			validSig = freshSigningKey !== signingKey
 				? verifySignatureWithKey(freshSigningKey, msgBytes, sigBytes)
 				: false;
-		} catch (err) {
+		} catch {
 			throw new XRPCError({
 				status: 401,
 				error: "BadJwtSignature",

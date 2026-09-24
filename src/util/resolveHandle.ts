@@ -20,7 +20,7 @@ async function resolveDns(handle: string): Promise<string | undefined> {
 	let chunkedResults: string[][];
 	try {
 		chunkedResults = await dns.resolveTxt(`_atproto.${handle}`);
-	} catch (err) {
+	} catch {
 		return undefined;
 	}
 	return parseDnsResult(chunkedResults);
@@ -35,7 +35,7 @@ async function resolveHttp(handle: string, signal?: AbortSignal): Promise<string
 			return did;
 		}
 		return undefined;
-	} catch (err) {
+	} catch {
 		return undefined;
 	}
 }
