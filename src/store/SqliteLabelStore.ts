@@ -114,7 +114,7 @@ export class SqliteLabelStore implements LabelStore {
 }
 
 function rowToLabel(row: Row): StoredLabel {
-	if (!row.sig) throw new Error(`Label ${String(row.id)} has no signature`);
+	if (!row.sig) throw new Error(`Label ${Number(row.id)} has no signature`);
 	return {
 		id: Number(row.id),
 		src: row.src as Did,

@@ -116,7 +116,7 @@ describe.each(backends)("LabelerServer integration ($name)", (backend) => {
 			const res = await server.app.inject({ method: "GET", url: "/xrpc/_health" });
 
 			expect(res.statusCode).toBe(200);
-			expect(JSON.parse(res.body)).toEqual({ version: "0.3.0" });
+			expect(JSON.parse(res.body)).toEqual({ version: "1.0.1" });
 		});
 	});
 

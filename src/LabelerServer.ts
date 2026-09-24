@@ -173,7 +173,7 @@ export class LabelerServer {
 	 * @returns A promise that resolves when initialization is complete
 	 */
 	private async initializeDatabase() {
-		await this.store.init().catch((error) => {
+		await this.store.init().catch((error: unknown) => {
 			console.error("Failed to initialize database:", error);
 			throw error;
 		});
@@ -219,7 +219,7 @@ export class LabelerServer {
 	 */
 	close(callback: () => void = () => {}) {
 		this.app.close(() => {
-			this.store.close().catch((error) => {
+			this.store.close().catch((error: unknown) => {
 				console.error("Failed to close database:", error);
 			}).finally(callback);
 		});
@@ -579,6 +579,8 @@ export class LabelerServer {
 			});
 		}
 
+		// The request body is untrusted: clients may omit subjectBlobCids despite its type
+		// eslint-disable-next-line @typescript-eslint/no-useless-default-assignment
 		const { event, subject, subjectBlobCids = [], createdBy } = req.body;
 		if (!event || !subject || !createdBy) {
 			throw new XRPCError({
@@ -649,13 +651,13 @@ export class LabelerServer {
 	 * Handler for the health check endpoint.
 	 */
 	healthHandler: QueryHandler = async (_req, res) => {
-		const VERSION = "0.3.0";
+		const VERSION = "1.0.1";
 		try {
 			await this.store.ping();
-			return res.send({ version: VERSION });
-		} catch (e) {
+		} catch {
 			return res.status(503).send({ version: VERSION, error: "Service Unavailable" });
 		}
+		return res.send({ version: VERSION });
 	};
 
 	/**
