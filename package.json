@@ -2,7 +2,7 @@
 	"name": "labeler",
 	"type": "module",
 	"description": "A lightweight alternative to Ozone for operating an atproto labeler.",
-	"version": "0.3.0",
+	"version": "1.0.1",
 	"packageManager": "pnpm@11.18.0",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",

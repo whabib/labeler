@@ -651,7 +651,7 @@ export class LabelerServer {
 	 * Handler for the health check endpoint.
 	 */
 	healthHandler: QueryHandler = async (_req, res) => {
-		const VERSION = "0.3.0";
+		const VERSION = "1.0.1";
 		try {
 			await this.store.ping();
 		} catch {
