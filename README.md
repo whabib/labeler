@@ -90,7 +90,7 @@ docker run -d --rm --name labeler-pg-test -e POSTGRES_PASSWORD=test -p 55432:543
 TEST_DATABASE_URL=postgresql://postgres:test@127.0.0.1:55432/postgres pnpm test
 ```
 
-## Upgrading to 0.3.0
+## Upgrading to 1.0.0
 
 - The public `db` field (a libSQL client) was replaced by `store`, which works with both SQLite and PostgreSQL. `createLabel` and `createLabels` return each label's `id` and signature, so there's no need to query the database after creating a label.
 - `close()` now also closes the database connection, unless you passed in your own Postgres pool.
