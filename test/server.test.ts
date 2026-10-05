@@ -380,6 +380,28 @@ describe.each(backends)("LabelerServer integration ($name)", (backend) => {
 			const bodyDot = JSON.parse(resDot.body);
 			expect(bodyDot.labels.length).toBe(0);
 		});
+
+		it("treats backslashes in uriPatterns as literal characters", async () => {
+			await server.createLabel({ uri: "did:plc:backslashtest", val: "backslash-label" });
+
+			// `\` is the LIKE escape character: unescaped, "\t" would match a plain "t". Label
+			// URIs can't contain a backslash, so none of these should match.
+			for (
+				const pattern of [
+					"did:plc:backslash\\test",
+					"did:plc:backslash\\t*",
+					"did:plc:backslash\\",
+				]
+			) {
+				const res = await server.app.inject({
+					method: "GET",
+					url: "/xrpc/com.atproto.label.queryLabels?uriPatterns="
+						+ encodeURIComponent(pattern),
+				});
+				expect(res.statusCode).toBe(200);
+				expect(JSON.parse(res.body).labels).toEqual([]);
+			}
+		});
 	});
 
 	describe("Subscription catch-up buffering", () => {

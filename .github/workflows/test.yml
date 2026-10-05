@@ -6,6 +6,10 @@ on:
     branches:
       - main
 
+# The tests only need to read the repository
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Test (Node ${{ matrix.node-version }})
