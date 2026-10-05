@@ -430,7 +430,9 @@ export class LabelerServer {
 		}
 
 		const patterns = uriPatterns.includes("*") ? [] : uriPatterns.map((pattern) => {
-			pattern = pattern.replaceAll(/%/g, "").replaceAll(/_/g, "\\_");
+			// Escape `_` and `\` itself, the LIKE escape character (otherwise it would escape the
+			// next character, and "did:plc:ab\c" would match "did:plc:abc")
+			pattern = pattern.replaceAll(/%/g, "").replaceAll(/[\\_]/g, "\\$&");
 
 			const starIndex = pattern.indexOf("*");
 			if (starIndex === -1) return pattern;

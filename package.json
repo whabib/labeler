@@ -2,7 +2,7 @@
 	"name": "labeler",
 	"type": "module",
 	"description": "A lightweight alternative to Ozone for operating an atproto labeler.",
-	"version": "1.0.1",
+	"version": "1.0.2",
 	"packageManager": "pnpm@11.18.0",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -54,7 +54,7 @@
 		"@libsql/client": "^0.14.0",
 		"@noble/curves": "^1.6.0",
 		"@noble/hashes": "^1.5.0",
-		"fastify": "^5.12.1",
+		"fastify": "^5.12.5",
 		"pg": "^8.23.0",
 		"prompts": "^2.4.2",
 		"uint8arrays": "^5.1.0"
