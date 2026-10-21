@@ -1,2 +1,8 @@
 allowBuilds:
   dprint: false
+
+# Minimum versions for transitive dev dependencies with security fixes (Dependabot
+# alerts #54-#57). Safe to remove once the packages that pull them in require these.
+overrides:
+  vite: ">=8.3.3 <9"
+  source-map-js: ">=1.2.2 <2"
