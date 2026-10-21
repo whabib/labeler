@@ -116,7 +116,12 @@ describe.each(backends)("LabelerServer integration ($name)", (backend) => {
 			const res = await server.app.inject({ method: "GET", url: "/xrpc/_health" });
 
 			expect(res.statusCode).toBe(200);
-			expect(JSON.parse(res.body)).toEqual({ version: "1.0.1" });
+			// The package's own version, so it can't go stale like a hardcoded one
+			const { version } = JSON.parse(
+				await fs.readFile(new URL("../package.json", import.meta.url), "utf8"),
+			);
+			expect(version).toMatch(/^\d+\.\d+\.\d+/);
+			expect(JSON.parse(res.body)).toEqual({ version });
 		});
 	});
 

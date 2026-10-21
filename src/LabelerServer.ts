@@ -9,6 +9,7 @@ import fastify, {
 	type FastifyListenOptions,
 	type FastifyRequest,
 } from "fastify";
+import { readFileSync } from "node:fs";
 import { WebSocket } from "ws";
 import type { LabelStore } from "./store/LabelStore.js";
 import { PostgresLabelStore, type PostgresLabelStoreOptions } from "./store/PostgresLabelStore.js";
@@ -26,6 +27,10 @@ import type {
 	UnsignedLabel,
 } from "./util/types.js";
 import { excludeNullish, frameToBytes } from "./util/util.js";
+
+/** This package's version, from its package.json (one level above both src/ and dist/). */
+const VERSION: string =
+	JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
 const INVALID_DID_ERROR =
 	`Make sure to provide a valid DID using either did:plc or did:web methods.`;
@@ -653,7 +658,6 @@ export class LabelerServer {
 	 * Handler for the health check endpoint.
 	 */
 	healthHandler: QueryHandler = async (_req, res) => {
-		const VERSION = "1.0.1";
 		try {
 			await this.store.ping();
 		} catch {
